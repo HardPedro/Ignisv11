@@ -5,6 +5,13 @@ import path from 'path';
 import nodemailer from 'nodemailer';
 import { GoogleGenAI } from '@google/genai';
 import { handleAIResponse } from './server/aiService.js';
+import fs from 'fs';
+
+// Helper to log to file
+const logToFile = (msg: string) => {
+  fs.appendFileSync('server.log', `${new Date().toISOString()} - ${msg}\n`);
+  console.log(msg);
+};
 
 async function startServer() {
   const app = express();
@@ -49,31 +56,31 @@ async function startServer() {
   app.post('/webhooks/zapi', async (req, res) => {
     try {
       const data = req.body;
-      console.log('Z-API Webhook received event type:', data.type || 'unknown');
+      logToFile(`Z-API Webhook received event type: ${data.type || 'unknown'}`);
       
       // Z-API payload structure
       const instanceId = data.instanceId;
       
       if (!instanceId) {
-        console.log('Webhook error: Missing instanceId');
+        logToFile('Webhook error: Missing instanceId');
         return res.status(400).send('Missing instanceId');
       }
 
       // 1. Ignore status updates (delivery, read receipts) if they come to this webhook
       if (data.status && !data.messageId && !data.id) {
-        console.log('Ignoring status update event');
+        logToFile('Ignoring status update event');
         return res.status(200).send('OK');
       }
 
       // 2. Ignore events that are not messages (like connection status, presence, etc)
       if (!data.phone || (!data.messageId && !data.id)) {
-        console.log('Ignoring non-message event from Z-API');
+        logToFile('Ignoring non-message event from Z-API');
         return res.status(200).send('OK'); // Always return 200 so Z-API doesn't retry
       }
 
       // 3. Ignore group messages (usually we only want 1-on-1 customer service)
       if (data.isGroup || data.phone.includes('-')) {
-        console.log('Ignoring group message');
+        logToFile('Ignoring group message');
         return res.status(200).send('OK');
       }
 
@@ -194,11 +201,14 @@ async function startServer() {
       // Gemini AI Integration (Moved to backend aiService)
       if (!fromMe && type === 'text') {
         try {
+          logToFile(`Checking AI for tenant ${tenantId}, conv ${convId}`);
           // Check if AI is enabled for this tenant
           const tenantDoc = await getDoc(doc(db, 'tenants', tenantId));
           const tenantData = tenantDoc.data();
           
-          if (tenantData?.plan === 'Central Inteligente' && convData.bot_active !== false) {
+          logToFile(`Tenant plan: ${tenantData?.plan}, bot_active: ${convData.bot_active}`);
+          if (convData.bot_active !== false) {
+            logToFile(`Triggering handleAIResponse`);
             await handleAIResponse(
               tenantId,
               tenantData,
@@ -209,9 +219,11 @@ async function startServer() {
               waNumber.data(),
               messagesRef
             );
+          } else {
+            logToFile(`Bot is inactive for this conversation`);
           }
         } catch (aiError) {
-          console.error('Error generating AI response:', aiError);
+          logToFile(`Error generating AI response: ${aiError}`);
         }
       }
 
@@ -220,6 +232,36 @@ async function startServer() {
       console.error('Z-API Webhook Error:', error);
       // Always return 200 to Z-API even on our internal errors so it doesn't keep retrying and blocking the queue
       res.status(200).send('Internal Server Error Handled');
+    }
+  });
+
+  // Test endpoint to simulate incoming webhook
+  app.post('/api/test-webhook', async (req, res) => {
+    try {
+      const { instanceId, phone, message, senderName } = req.body;
+      
+      const payload = {
+        type: 'text',
+        instanceId: instanceId || 'test_instance',
+        phone: phone || '5511999999999',
+        messageId: `test_${Date.now()}`,
+        fromMe: false,
+        text: { message: message || 'Teste de mensagem' },
+        senderName: senderName || 'Cliente Teste'
+      };
+      
+      // Call the webhook handler directly or make a fetch request to it
+      const response = await fetch(`http://localhost:${PORT}/webhooks/zapi`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      
+      const result = await response.text();
+      res.json({ success: true, result });
+    } catch (error) {
+      console.error('Test webhook error:', error);
+      res.status(500).json({ error: String(error) });
     }
   });
 
@@ -441,8 +483,15 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  app.listen(PORT, "0.0.0.0", async () => {
     console.log(`Server running on http://localhost:${PORT}`);
+    try {
+      const numsRef = collection(db, 'whatsapp_numbers');
+      const snap = await getDocs(numsRef);
+      snap.forEach(doc => console.log('Instance:', doc.data().instanceId));
+    } catch (e) {
+      console.log('Could not fetch instances on startup', e);
+    }
   });
 }
 

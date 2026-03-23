@@ -1,8 +1,11 @@
 import { initializeApp } from 'firebase/app';
-import { getFirestore } from 'firebase/firestore';
+import { getFirestore, setLogLevel } from 'firebase/firestore';
 import { getAuth } from 'firebase/auth';
 import fs from 'fs';
 import path from 'path';
+
+// Suppress idle stream warnings from Firestore JS SDK in Node.js
+setLogLevel('silent');
 
 const configPath = path.join(process.cwd(), 'firebase-applet-config.json');
 let firebaseConfig: any = {};

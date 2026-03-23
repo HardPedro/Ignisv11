@@ -506,7 +506,7 @@ export function Settings() {
     setIsZapiQrModalOpen(true);
   };
 
-  const isSuperAdmin = userData?.email === 'harddisk1911@gmail.com';
+  const isSuperAdmin = userData?.email === 'harddisk1911@gmail.com' || userData?.email === 'pedrohardsolu2025@gmail.com';
   const isCoreOperacional = tenantData?.plan === 'Core Operacional';
   const [activeTab, setActiveTab] = useState('general');
 

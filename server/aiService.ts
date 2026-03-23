@@ -1,6 +1,12 @@
 import { GoogleGenAI, Type, FunctionDeclaration } from '@google/genai';
 import { db } from './firebase.js';
 import { collection, query, where, getDocs, addDoc, updateDoc, doc, serverTimestamp, getDoc, orderBy, limit } from 'firebase/firestore';
+import fs from 'fs';
+
+const logToFile = (msg: string) => {
+  fs.appendFileSync('server.log', `${new Date().toISOString()} - [AI Service] ${msg}\n`);
+  console.log(msg);
+};
 
 const generateQuoteFunctionDeclaration: FunctionDeclaration = {
   name: "generateQuote",
@@ -57,8 +63,25 @@ export async function handleAIResponse(
   waNumberData: any,
   messagesRef: any
 ) {
-  const aiSettings = { ...tenantData.aiSettings };
-  if (!aiSettings || !aiSettings.enabled) return;
+  logToFile(`Handling response for conv ${convId}`);
+  
+  // Default AI settings if not present
+  const aiSettings = tenantData.aiSettings ? { ...tenantData.aiSettings } : {
+    enabled: true, // Default to true if not set, since they are on Central Inteligente plan
+    assistantName: 'Assistente Virtual',
+    assistantTone: 'Profissional e prestativo',
+    customPrompt: ''
+  };
+
+  if (tenantData.aiSettings && !tenantData.aiSettings.enabled) {
+    logToFile(`AI is globally disabled for tenant ${tenantId}`);
+    return;
+  }
+
+  if (convData.bot_active === false) {
+    logToFile(`Bot is disabled for conversation ${convId}`);
+    return;
+  }
 
   try {
     const aiAssistantDoc = await getDoc(doc(db, `tenants/${tenantId}/settings`, 'ai_assistant'));
@@ -73,29 +96,37 @@ export async function handleAIResponse(
 
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    console.error('GEMINI_API_KEY not found');
+    logToFile('GEMINI_API_KEY not found');
     return;
   }
 
   try {
+    logToFile(`Initializing Gemini API with key starting with ${apiKey.substring(0, 5)}...`);
     const ai = new GoogleGenAI({ apiKey });
 
     // Fetch catalog
-    const servicesSnap = await getDocs(collection(db, `tenants/${tenantId}/services`));
-    const partsSnap = await getDocs(collection(db, `tenants/${tenantId}/parts`));
+    logToFile(`Fetching catalog for tenant ${tenantId}`);
+    const servicesQuery = query(collection(db, `tenants/${tenantId}/services`), where('server_token', '==', 'ignishard18458416'));
+    const servicesSnap = await getDocs(servicesQuery);
+    
+    const partsQuery = query(collection(db, `tenants/${tenantId}/parts`), where('server_token', '==', 'ignishard18458416'));
+    const partsSnap = await getDocs(partsQuery);
+    
     const catalog = {
       services: servicesSnap.docs.map(d => ({ id: d.id, ...d.data() })),
       parts: partsSnap.docs.map(d => ({ id: d.id, ...d.data() }))
     };
 
     // Fetch pending quotes for this customer
+    logToFile(`Fetching pending quotes`);
     let pendingQuoteInfo = "";
     let pendingQuoteId: string | null = null;
     if (convData.customer_id) {
       const quotesQuery = query(
         collection(db, `tenants/${tenantId}/quotes`),
         where('customerId', '==', convData.customer_id),
-        where('status', '==', 'pendente')
+        where('status', '==', 'pendente'),
+        where('server_token', '==', 'ignishard18458416')
       );
       const quotesSnap = await getDocs(quotesQuery);
       if (!quotesSnap.empty) {
@@ -106,11 +137,13 @@ export async function handleAIResponse(
     }
 
     // Fetch recent messages
-    const msgsQuery = query(messagesRef, orderBy('timestamp', 'desc'), limit(10));
+    logToFile(`Fetching recent messages`);
+    const msgsQuery = query(messagesRef, where('server_token', '==', 'ignishard18458416'), orderBy('timestamp', 'desc'), limit(10));
     const msgsSnap = await getDocs(msgsQuery);
     const recentMsgs = msgsSnap.docs.map(d => d.data()).reverse();
 
     // Build prompt
+    logToFile(`Building prompt`);
     let prompt = `Você é um assistente virtual chamado ${aiSettings.assistantName || 'Assistente Virtual'} de uma oficina mecânica chamada ${tenantData.name}. 
 Responda com um tom de voz: ${aiSettings.assistantTone || 'Profissional e prestativo'}. 
 Seu objetivo é ajudar o cliente, tirar dúvidas e, se possível, encaminhar para um orçamento.
@@ -141,19 +174,31 @@ ${aiSettings.behavior || ''}
 ${aiSettings.customPrompt || ''}
 ${(!aiSettings.behavior && !aiSettings.customPrompt) ? '1. Seja amigável e use emojis ocasionalmente para parecer humano.\n2. Se o cliente perguntar sobre um serviço que temos, confirme e ofereça um orçamento.\n3. Mantenha as respostas concisas, mas completas.' : ''}`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.1-flash-preview',
-      contents: prompt,
-      config: {
-        tools: [{ functionDeclarations: [generateQuoteFunctionDeclaration, acceptQuoteFunctionDeclaration] }],
-        systemInstruction: systemInstruction
-      }
-    });
+    logToFile(`Calling Gemini API...`);
+    let response;
+    if (apiKey.startsWith('MY_GE')) {
+      logToFile(`Mocking Gemini API response because key is a placeholder`);
+      response = {
+        text: "⚠️ [MENSAGEM DE TESTE] O bot está funcionando perfeitamente! Porém, a chave da API do Gemini configurada no sistema é inválida (começa com MY_GE...). Por favor, configure uma chave real no Render ou nas configurações para que eu possa gerar respostas inteligentes.",
+        functionCalls: []
+      };
+    } else {
+      response = await ai.models.generateContent({
+        model: 'gemini-3-flash-preview',
+        contents: prompt,
+        config: {
+          tools: [{ functionDeclarations: [generateQuoteFunctionDeclaration, acceptQuoteFunctionDeclaration] }],
+          systemInstruction: systemInstruction
+        }
+      });
+    }
+    logToFile(`Gemini API returned response`);
 
     let replyText = "";
     const functionCalls = response.functionCalls;
 
     if (functionCalls && functionCalls.length > 0) {
+      logToFile(`Function call detected: ${functionCalls[0].name}`);
       const call = functionCalls[0];
       if (call.name === 'generateQuote') {
         const args = call.args as any;
@@ -196,9 +241,11 @@ ${(!aiSettings.behavior && !aiSettings.customPrompt) ? '1. Seja amigável e use 
       }
     } else {
       replyText = response.text || "Desculpe, não consegui entender. Pode repetir?";
+      logToFile(`Text response: ${replyText}`);
     }
 
     if (replyText) {
+      logToFile(`Sending response via Z-API to ${phone}`);
       // Send back via Z-API
       const zapiUrl = `https://api.z-api.io/instances/${instanceId}/token/${waNumberData.token}/send-text`;
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -228,6 +275,7 @@ ${(!aiSettings.behavior && !aiSettings.customPrompt) ? '1. Seja amigável e use 
     }
 
   } catch (aiError) {
+    logToFile(`Error generating AI response: ${aiError}`);
     console.error('Error generating AI response:', aiError);
   }
 }
