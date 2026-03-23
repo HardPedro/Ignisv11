@@ -1,4 +1,7 @@
 import express from 'express';
+import dotenv from 'dotenv';
+dotenv.config({ override: true });
+
 import { db } from './server/firebase.js';
 import { collection, query, where, getDocs, addDoc, updateDoc, doc, serverTimestamp, getDoc, setDoc } from 'firebase/firestore';
 import path from 'path';

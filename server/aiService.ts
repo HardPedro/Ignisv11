@@ -271,6 +271,10 @@ ${(!aiSettings.behavior && !aiSettings.customPrompt) ? '1. Seja amigável e use 
           server_token: 'ignishard18458416'
         });
         console.log(`AI response sent and saved for conv ${convId}`);
+      } else {
+        const errorText = await res.text();
+        logToFile(`Failed to send response via Z-API: ${res.status} ${errorText}`);
+        console.error(`Failed to send response via Z-API: ${res.status} ${errorText}`);
       }
     }
 
